@@ -14,7 +14,7 @@ trait ZIOApp {
   def run: ZIO[Any]
 
   def main(args: Array[String]): Unit =
-    println(s"The result was ${run.run}")
+    run.run(result => println(s"The result was $result"))
 
 }
 
