@@ -53,3 +53,48 @@ object map extends ZIOApp {
 
   override def run: ZIO[Person] = personZIO
 }
+
+object mapUhOh extends ZIOApp {
+  val zippedZIO: ZIO[(Int, String)] =
+    ZIO.succeed(8) zip ZIO.succeed("LO")
+
+  def printLine(message: String): ZIO[Unit] =
+    ZIO.succeed(println(message))
+
+  val mappedZIO =
+    zippedZIO.map{ tuple => printLine(s"MY BEAUTIFUL TUPLE: $tuple")}
+
+  def run: ZIO[ZIO[Unit]] = mappedZIO
+}
+
+object flatMap extends ZIOApp {
+  val zippedZIO: ZIO[(Int, String)] =
+    ZIO.succeed(8) zip ZIO.succeed("LO")
+
+  def printLine(message: String): ZIO[Unit] =
+    ZIO.succeed(println(message))
+
+  val flatMappedZIO: ZIO[Unit] =
+    zippedZIO.flatMap{ tuple => printLine(s"MY BEAUTIFUL TUPLE: $tuple")}
+
+  def run: ZIO[Unit] = flatMappedZIO
+}
+
+object forComprehension extends ZIOApp {
+  val zippedZIO: ZIO[(Int, String)] =
+    ZIO.succeed(8) zip ZIO.succeed("LO")
+
+  def printLine(message: String): ZIO[Unit] =
+    ZIO.succeed(println(message))
+
+  val flatMappedZIO =
+    zippedZIO
+      .flatMap(tuple =>
+        printLine(s"MY BEAUTIFUL TUPLE: $tuple")
+          .as("Nice")
+      )
+
+  def run: ZIO[String] = flatMappedZIO
+}
+
+
