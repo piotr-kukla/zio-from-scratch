@@ -5,10 +5,15 @@ sealed trait ZIO[+A] { self =>
 
   def flatMap[B](f: A => ZIO[B]): ZIO[B] = ZIO.FlatMap(self, f)
 
-  def map[B](f: A => B): ZIO[B] = ZIO.Map(self, f)
+  def map[B](f: A => B): ZIO[B] =
+    flatMap(a => ZIO.succeedNow(f(a)))
 
 
-  def zip[B](that: ZIO[B]): ZIO[(A,B)] = ZIO.Zip(self, that)
+  def zip[B](that: ZIO[B]): ZIO[(A,B)] =
+    for {
+      a <- self
+      b <- that
+    } yield (a,b)
 
 
   def run(callback: A => Unit) : Unit
@@ -27,20 +32,6 @@ object ZIO {
 
   case class Effect[A](f: () => A) extends ZIO[A] {
     override def run(callback: A => Unit): Unit = callback(f())
-  }
-
-  case class Zip[A,B](left: ZIO[A], right: ZIO[B]) extends ZIO[(A,B)] {
-    override def run(callback: ((A, B)) => Unit): Unit =
-      left.run { a =>
-        right.run { b =>
-          callback(a,b)
-        }
-      }
-  }
-
-  case class Map[A,B](zio: ZIO[A], f: A => B) extends ZIO[B] {
-    override def run(callback: B => Unit): Unit =
-      zio.run { a => callback(f(a))}
   }
 
   case class FlatMap[A, B](zio: ZIO[A], f: A => ZIO[B]) extends ZIO[B] {
