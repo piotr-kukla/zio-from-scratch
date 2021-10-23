@@ -30,3 +30,10 @@ object succeed extends ZIOApp {
 
   override def run: ZIO[Unit] = howdyZIO
 }
+
+object zip extends ZIOApp {
+  val zippedZIO: ZIO[(Int, String)] =
+    ZIO.succeed(8) zip ZIO.succeed("LO")
+
+  override def run: ZIO[(Int, String)] = zippedZIO
+}
