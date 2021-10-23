@@ -37,3 +37,19 @@ object zip extends ZIOApp {
 
   override def run: ZIO[(Int, String)] = zippedZIO
 }
+
+object map extends ZIOApp {
+  val zippedZIO: ZIO[(Int, String)] =
+    ZIO.succeed(8) zip ZIO.succeed("LO")
+
+  val mappedZIO: ZIO[String] =
+    zippedZIO.map {
+      case (int, string) => string * int
+    }
+
+  val personZIO: ZIO[Person] = zippedZIO.map {
+    case (int, string) => Person(string, int)
+  }
+
+  override def run: ZIO[Person] = personZIO
+}
