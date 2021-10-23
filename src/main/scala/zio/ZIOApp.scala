@@ -24,3 +24,9 @@ object succeedNow extends ZIOApp {
 
   override def run: ZIO[Person] = peterZIO
 }
+
+object succeed extends ZIOApp {
+  val howdyZIO = ZIO.succeed(println("Howdy!"));
+
+  override def run: ZIO[Unit] = howdyZIO
+}
