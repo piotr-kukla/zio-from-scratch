@@ -97,4 +97,14 @@ object forComprehension extends ZIOApp {
   def run: ZIO[String] = flatMappedZIO
 }
 
+object async extends ZIOApp {
+  val asyncZIO: ZIO[Int] = ZIO.async[Int] { complete =>
+    println("Async Beinneth!")
+    Thread.sleep(1000)
+    complete(10)
+  }
+
+  def run = asyncZIO
+}
+
 
