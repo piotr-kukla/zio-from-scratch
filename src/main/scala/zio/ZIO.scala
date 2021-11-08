@@ -20,6 +20,8 @@ sealed trait ZIO[+A] { self =>
 }
 
 object ZIO {
+  def async[A](register: (A => Any) => Any):ZIO[A] = ZIO.Async(register)
+
   def succeed[A](value: => A): ZIO[A] = ZIO.Effect(() => value)
 
 
@@ -41,4 +43,7 @@ object ZIO {
       }
   }
 
+  case class Async[A](register: (A => Any) => Any) extends ZIO[A] {
+    override def run(callback: A => Unit): Unit = register(callback)
+  }
 }
