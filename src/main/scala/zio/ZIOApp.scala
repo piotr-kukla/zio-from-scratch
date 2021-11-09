@@ -13,8 +13,12 @@ trait ZIOApp {
 
   def run: ZIO[Any]
 
-  def main(args: Array[String]): Unit =
+  def main(args: Array[String]): Unit = {
     run.run(result => println(s"The result was $result"))
+
+    Thread.sleep(3000)
+  }
+
 
 }
 
@@ -105,6 +109,28 @@ object async extends ZIOApp {
   }
 
   def run = asyncZIO
+}
+
+object fork extends ZIOApp {
+  val asyncZIO: ZIO[Int] = ZIO.async[Int] { complete =>
+    println("Async Beinneth!")
+    Thread.sleep(2000)
+    complete(scala.util.Random.nextInt(999))
+  }
+
+  def printLine(message: String): ZIO[Unit] =
+    ZIO.succeed(println(message))
+
+  val forkedZIO = for {
+    fiber  <- asyncZIO.fork
+    fiber2 <- asyncZIO.fork
+    _      <- printLine("NICE")
+    int    <- fiber.join
+    int2   <- fiber2.join
+  } yield s"My beautiful ints ($int, $int2)"
+
+
+  def run = forkedZIO
 }
 
 
