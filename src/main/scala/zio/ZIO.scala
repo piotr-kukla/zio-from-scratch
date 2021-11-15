@@ -29,6 +29,8 @@ class FiberImpl[A](zio: ZIO[A]) extends Fiber[A] {
 }
 
 sealed trait ZIO[+A] { self =>
+
+
   def fork: ZIO[Fiber[A]] = ZIO.Fork(self)
 
   def as[B](value: B): ZIO[B] = self.map(_ => value)
@@ -38,6 +40,13 @@ sealed trait ZIO[+A] { self =>
   def map[B](f: A => B): ZIO[B] =
     flatMap(a => ZIO.succeedNow(f(a)))
 
+  def zipPar[B](that: ZIO[B]): ZIO[(A,B)] =
+    for {
+      f1 <- self.fork
+      f2 <- that.fork
+      a <- f1.join
+      b <- f2.join
+    } yield (a,b)
 
   def zip[B](that: ZIO[B]): ZIO[(A,B)] =
     for {
