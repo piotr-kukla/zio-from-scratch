@@ -129,8 +129,13 @@ object fork extends ZIOApp {
     int2   <- fiber2.join
   } yield s"My beautiful ints ($int, $int2)"
 
+  val forked2ZIO = ZIO.succeed(5).fork
+    .flatMap(fiber =>
+      fiber.join
+        .map(int => int)
+    ) // s"My beautifule int $int"
 
-  def run = forkedZIO
+  def run = forked2ZIO
 }
 
 
