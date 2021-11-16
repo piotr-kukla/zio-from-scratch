@@ -40,6 +40,10 @@ sealed trait ZIO[+A] { self =>
   def map[B](f: A => B): ZIO[B] =
     flatMap(a => ZIO.succeedNow(f(a)))
 
+  def repeat(n: Int): ZIO[Unit] =
+    if (n <= 0) ZIO.succeedNow()
+    else self *> repeat(n-1)
+
   def zipPar[B](that: ZIO[B]): ZIO[(A,B)] =
     for {
       f1 <- self.fork
@@ -49,11 +53,18 @@ sealed trait ZIO[+A] { self =>
     } yield (a,b)
 
   def zip[B](that: ZIO[B]): ZIO[(A,B)] =
+    zipWith(that)(_ -> _)
+
+  def *>[B](that: ZIO[B]): ZIO[B] = self zipRight that
+
+  def zipRight[B](that: ZIO[B]): ZIO[B] =
+    zipWith(that)((_,b) => b)
+
+  def zipWith[B, C](that: ZIO[B])(f: (A, B) => C): ZIO[C] =
     for {
       a <- self
       b <- that
-    } yield (a,b)
-
+    } yield f(a,b)
 
   def run(callback: A => Unit) : Unit
 }
