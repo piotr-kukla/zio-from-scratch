@@ -1,5 +1,7 @@
 package zio
 
+import zio.ZIO.{Async, Effect, FlatMap, Fork, Succeed}
+
 import scala.concurrent.ExecutionContext
 
 trait Fiber[+A] {
@@ -55,18 +57,57 @@ sealed trait ZIO[+A] { self =>
   def zip[B](that: ZIO[B]): ZIO[(A,B)] =
     zipWith(that)(_ -> _)
 
-  def *>[B](that: ZIO[B]): ZIO[B] = self zipRight that
+  def *>[B](that: => ZIO[B]): ZIO[B] = self zipRight that
 
-  def zipRight[B](that: ZIO[B]): ZIO[B] =
+  def zipRight[B](that: => ZIO[B]): ZIO[B] =
     zipWith(that)((_,b) => b)
 
-  def zipWith[B, C](that: ZIO[B])(f: (A, B) => C): ZIO[C] =
+  def zipWith[B, C](that: => ZIO[B])(f: (A, B) => C): ZIO[C] =
     for {
       a <- self
       b <- that
     } yield f(a,b)
 
-  def run(callback: A => Unit) : Unit
+  final def run(callback: A => Unit) : Unit = {
+
+    type Erased = ZIO[Any]
+    type Cont = Any => Erased
+
+    def erase[A](zio: ZIO[A]): Erased = zio
+
+    val stack = new scala.collection.mutable.Stack[Cont]()
+
+    var currentZIO = erase(self)
+
+    var loop = true
+
+    def complete(value: Any) = {
+      if (stack.isEmpty) {
+        loop = false;
+        callback(value.asInstanceOf[A])
+      } else {
+        val cont = stack.pop()
+        currentZIO = cont(value)
+      }
+    }
+
+    while (loop) {
+      currentZIO match {
+        case Succeed(value) =>
+          complete(value)
+        case Effect(thunk) =>
+          complete(thunk())
+        case FlatMap(zio, cont: Cont) =>
+          stack.push(cont)
+          currentZIO = zio
+
+        case Async(register) =>
+
+        case Fork(zio) =>
+
+      }
+    }
+  }
 }
 
 object ZIO {
@@ -79,29 +120,29 @@ object ZIO {
 
 
   case class Succeed[A](value: A) extends ZIO[A] {
-    override def run(callback: A => Unit): Unit = callback(value)
+    //override def run(callback: A => Unit): Unit = callback(value)
   }
 
   case class Effect[A](f: () => A) extends ZIO[A] {
-    override def run(callback: A => Unit): Unit = callback(f())
+    //override def run(callback: A => Unit): Unit = callback(f())
   }
 
   case class FlatMap[A, B](zio: ZIO[A], f: A => ZIO[B]) extends ZIO[B] {
-    override def run(callback: B => Unit): Unit =
-      zio.run { a =>
-        f(a).run(callback)
-      }
+//    override def run(callback: B => Unit): Unit =
+//      zio.run { a =>
+//        f(a).run(callback)
+//      }
   }
 
   case class Async[A](register: (A => Any) => Any) extends ZIO[A] {
-    override def run(callback: A => Unit): Unit = register(callback)
+    //override def run(callback: A => Unit): Unit = register(callback)
   }
 
   case class Fork[A](zio: ZIO[A]) extends ZIO[Fiber[A]] {
-    override def run(callback: Fiber[A] => Unit): Unit = {
-     val fiber = new FiberImpl(zio)
-     fiber.start()
-     callback(fiber)
-    }
+//    override def run(callback: Fiber[A] => Unit): Unit = {
+//     val fiber = new FiberImpl(zio)
+//     fiber.start()
+//     callback(fiber)
+//    }
   }
 }
