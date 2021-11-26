@@ -63,23 +63,32 @@ sealed trait ZIO[+A] { self =>
     zipWith(that)((_,b) => b)
 
   def zipWith[B, C](that: => ZIO[B])(f: (A, B) => C): ZIO[C] =
-    for {
-      a <- self
-      b <- that
-    } yield f(a,b)
+    self
+      .flatMap(a =>
+        that
+          .map(b => f(a, b))
+      )
 
   final def run(callback: A => Unit) : Unit = {
 
     type Erased = ZIO[Any]
+    type ErasedCallback = Any => Any
     type Cont = Any => Erased
 
     def erase[A](zio: ZIO[A]): Erased = zio
+
+    def erasedCallback[A](cb: A => Unit): ErasedCallback = cb.asInstanceOf[ErasedCallback]
 
     val stack = new scala.collection.mutable.Stack[Cont]()
 
     var currentZIO = erase(self)
 
     var loop = true
+
+    def resume(): Unit = {
+      loop = true;
+      run();
+    }
 
     def complete(value: Any) = {
       if (stack.isEmpty) {
@@ -91,22 +100,36 @@ sealed trait ZIO[+A] { self =>
       }
     }
 
-    while (loop) {
-      currentZIO match {
-        case Succeed(value) =>
-          complete(value)
-        case Effect(thunk) =>
-          complete(thunk())
-        case FlatMap(zio, cont: Cont) =>
-          stack.push(cont)
-          currentZIO = zio
+    def run(): Unit =
+      while (loop) {
+        currentZIO match {
+          case Succeed(value) =>
+            complete(value)
+          case Effect(thunk) =>
+            complete(thunk())
+          case FlatMap(zio, cont: Cont) =>
+            stack.push(cont)
+            currentZIO = zio
 
-        case Async(register) =>
+          case Async(register) => {
+            if (stack.isEmpty) {
+              loop = false
+              register(erasedCallback(callback))
+            } else {
+              loop = false;
+              register { a =>
+                currentZIO = ZIO.succeedNow(a)
+                resume()
+              }
+            }
+          }
 
-        case Fork(zio) =>
+          case Fork(zio) =>
 
+        }
       }
-    }
+
+    run()
   }
 }
 
