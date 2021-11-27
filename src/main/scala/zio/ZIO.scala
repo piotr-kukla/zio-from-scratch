@@ -1,5 +1,7 @@
 package zio
 
+import java.util.concurrent.atomic.AtomicReference
+
 import zio.ZIO.{Async, Effect, FlatMap, Fork, Succeed}
 
 import scala.concurrent.ExecutionContext
@@ -10,22 +12,52 @@ trait Fiber[+A] {
 }
 
 class FiberImpl[A](zio: ZIO[A]) extends Fiber[A] {
-  var maybeResult: Option[A] = None
-  var callbacks = List.empty[A => Any]
+
+  sealed trait FiberState
+
+  case class Running(callbacks: List[A => Any]) extends FiberState
+  case class Done(result: A) extends FiberState
+
+  val state: AtomicReference[FiberState] = new AtomicReference[FiberState](Running(List.empty))
+
+  def complete(result: A): Unit = {
+    var loop = true
+    while(loop) {
+      val oldState = state.get()
+      oldState match {
+        case Running(callbacks) =>
+          if (state.compareAndSet(oldState, Done(result))) {
+            callbacks.foreach(cb => cb(result))
+            loop = false
+          }
+        case Done(result) =>
+          throw new Exception("Internal defect: Fiber complete twice.")
+      }
+    }
+  }
+
+  def await(callback: A => Any): Unit = {
+    var loop = true
+    while(loop) {
+      var oldState = state.get()
+      oldState match {
+        case Running(callbacks) =>
+          loop = !state.compareAndSet(oldState, Running(callback :: callbacks))
+
+        case Done(result) =>
+          callback(result)
+          loop = false
+      }
+    }
+  }
 
   def start(): Unit =
     ExecutionContext.global.execute { () =>
-      zio.run { a =>
-        maybeResult = Some(a)
-        callbacks.foreach { callback => callback(a)}
-      }
+      zio.run(complete)
     }
 
-  override def join: ZIO[A] = maybeResult match {
-    case Some(a) => ZIO.succeedNow(a)
-    case None => ZIO.async { complete =>
-      callbacks = complete :: callbacks
-    }
+  override def join: ZIO[A] = ZIO.async {
+    complete => await(complete)
   }
 
 }
@@ -124,7 +156,11 @@ sealed trait ZIO[+A] { self =>
             }
           }
 
-          case Fork(zio) =>
+          case Fork(zio) => {
+            val fiber = new FiberImpl(zio)
+            fiber.start()
+            complete(fiber)
+          }
 
         }
       }
