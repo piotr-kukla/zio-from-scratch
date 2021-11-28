@@ -178,30 +178,13 @@ object ZIO {
   def succeedNow[A](value: A): ZIO[A] = ZIO.Succeed(value)
 
 
-  case class Succeed[A](value: A) extends ZIO[A] {
-    //override def run(callback: A => Unit): Unit = callback(value)
-  }
+  case class Succeed[A](value: A) extends ZIO[A]
 
-  case class Effect[A](f: () => A) extends ZIO[A] {
-    //override def run(callback: A => Unit): Unit = callback(f())
-  }
+  case class Effect[A](f: () => A) extends ZIO[A]
 
-  case class FlatMap[A, B](zio: ZIO[A], f: A => ZIO[B]) extends ZIO[B] {
-//    override def run(callback: B => Unit): Unit =
-//      zio.run { a =>
-//        f(a).run(callback)
-//      }
-  }
+  case class FlatMap[A, B](zio: ZIO[A], f: A => ZIO[B]) extends ZIO[B]
 
-  case class Async[A](register: (A => Any) => Any) extends ZIO[A] {
-    //override def run(callback: A => Unit): Unit = register(callback)
-  }
+  case class Async[A](register: (A => Any) => Any) extends ZIO[A]
 
-  case class Fork[A](zio: ZIO[A]) extends ZIO[Fiber[A]] {
-//    override def run(callback: Fiber[A] => Unit): Unit = {
-//     val fiber = new FiberImpl(zio)
-//     fiber.start()
-//     callback(fiber)
-//    }
-  }
+  case class Fork[A](zio: ZIO[A]) extends ZIO[Fiber[A]]
 }
