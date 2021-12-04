@@ -14,9 +14,8 @@ trait ZIOApp {
   def run: ZIO[Any]
 
   def main(args: Array[String]): Unit = {
-    run.run(result => println(s"The result was $result"))
-
-    Thread.sleep(3000)
+    val result = run.unsafeRunSync
+    println(s"The result was $result")
   }
 
 
@@ -30,7 +29,7 @@ object succeedNow extends ZIOApp {
 }
 
 object succeed extends ZIOApp {
-  val howdyZIO = ZIO.succeed(println("Howdy!"));
+  val howdyZIO = ZIO.succeed(println("Howdy!"))
 
   override def run: ZIO[Unit] = howdyZIO
 }

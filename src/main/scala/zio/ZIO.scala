@@ -1,5 +1,6 @@
 package zio
 
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
 import zio.ZIO.{Async, Effect, FlatMap, Fork, Succeed}
@@ -7,11 +8,11 @@ import zio.ZIO.{Async, Effect, FlatMap, Fork, Succeed}
 import scala.concurrent.ExecutionContext
 
 trait Fiber[+A] {
-  def start: Unit
   def join: ZIO[A]
+  def interrupt: ZIO[Unit] = ???
 }
 
-class FiberImpl[A](zio: ZIO[A]) extends Fiber[A] {
+final case class FiberContext[A](startZIO: ZIO[A]) extends Fiber[A] {
 
   sealed trait FiberState
 
@@ -51,16 +52,125 @@ class FiberImpl[A](zio: ZIO[A]) extends Fiber[A] {
     }
   }
 
-  def start(): Unit =
-    ExecutionContext.global.execute { () =>
-      zio.run(complete)
-    }
-
   override def join: ZIO[A] = ZIO.async {
     complete => await(complete)
   }
 
+  type Erased = ZIO[Any]
+  type ErasedCallback = Any => Any
+  type Cont = Any => Erased
+
+  def erase[A](zio: ZIO[A]): Erased = zio
+
+  def erasedCallback[A](cb: A => Unit): ErasedCallback = cb.asInstanceOf[ErasedCallback]
+
+  val stack = new scala.collection.mutable.Stack[Cont]()
+
+  var currentZIO = erase(startZIO)
+
+  var loop = true
+
+  def resume(): Unit = {
+    loop = true;
+    run();
+  }
+
+  def continue(value: Any) = {
+    if (stack.isEmpty) {
+      loop = false;
+      complete(value.asInstanceOf[A])
+    } else {
+      val cont = stack.pop()
+      currentZIO = cont(value)
+    }
+  }
+
+  def run(): Unit =
+    while (loop) {
+      currentZIO match {
+        case Succeed(value) =>
+          continue(value)
+        case Effect(thunk) =>
+          continue(thunk())
+        case FlatMap(zio, cont: Cont) =>
+          stack.push(cont)
+          currentZIO = zio
+
+        case Async(register) => {
+          if (stack.isEmpty) {
+            loop = false
+            register { a => complete(a.asInstanceOf[A]) }
+          } else {
+            loop = false;
+            register { a =>
+              currentZIO = ZIO.succeedNow(a)
+              resume()
+            }
+          }
+        }
+
+        case Fork(zio) => {
+          val fiber = FiberContext(zio)
+          continue(fiber)
+        }
+
+      }
+    }
+
+  ExecutionContext.global.execute(() => run())
 }
+
+
+//class FiberImpl[A](zio: ZIO[A]) extends Fiber[A] {
+//
+//  sealed trait FiberState
+//
+//  case class Running(callbacks: List[A => Any]) extends FiberState
+//  case class Done(result: A) extends FiberState
+//
+//  val state: AtomicReference[FiberState] = new AtomicReference[FiberState](Running(List.empty))
+//
+//  def complete(result: A): Unit = {
+//    var loop = true
+//    while(loop) {
+//      val oldState = state.get()
+//      oldState match {
+//        case Running(callbacks) =>
+//          if (state.compareAndSet(oldState, Done(result))) {
+//            callbacks.foreach(cb => cb(result))
+//            loop = false
+//          }
+//        case Done(result) =>
+//          throw new Exception("Internal defect: Fiber complete twice.")
+//      }
+//    }
+//  }
+//
+//  def await(callback: A => Any): Unit = {
+//    var loop = true
+//    while(loop) {
+//      var oldState = state.get()
+//      oldState match {
+//        case Running(callbacks) =>
+//          loop = !state.compareAndSet(oldState, Running(callback :: callbacks))
+//
+//        case Done(result) =>
+//          callback(result)
+//          loop = false
+//      }
+//    }
+//  }
+//
+////  override def start(): Unit =
+////    ExecutionContext.global.execute { () =>
+////      zio.run(complete)
+////    }
+//
+//  override def join: ZIO[A] = ZIO.async {
+//    complete => await(complete)
+//  }
+//
+//}
 
 sealed trait ZIO[+A] { self =>
 
@@ -101,72 +211,23 @@ sealed trait ZIO[+A] { self =>
           .map(b => f(a, b))
       )
 
-  final def run(callback: A => Unit) : Unit = {
+  final def unsafeRunFiber: Fiber[A] =
+    FiberContext(self)
 
-    type Erased = ZIO[Any]
-    type ErasedCallback = Any => Any
-    type Cont = Any => Erased
-
-    def erase[A](zio: ZIO[A]): Erased = zio
-
-    def erasedCallback[A](cb: A => Unit): ErasedCallback = cb.asInstanceOf[ErasedCallback]
-
-    val stack = new scala.collection.mutable.Stack[Cont]()
-
-    var currentZIO = erase(self)
-
-    var loop = true
-
-    def resume(): Unit = {
-      loop = true;
-      run();
-    }
-
-    def complete(value: Any) = {
-      if (stack.isEmpty) {
-        loop = false;
-        callback(value.asInstanceOf[A])
-      } else {
-        val cont = stack.pop()
-        currentZIO = cont(value)
+  final def unsafeRunSync: A = {
+    val latch = new CountDownLatch(1)
+    var result: A = null.asInstanceOf[A]
+    val zio = self.flatMap { a =>
+      ZIO.succeed {
+        result = a
+        latch.countDown()
       }
     }
-
-    def run(): Unit =
-      while (loop) {
-        currentZIO match {
-          case Succeed(value) =>
-            complete(value)
-          case Effect(thunk) =>
-            complete(thunk())
-          case FlatMap(zio, cont: Cont) =>
-            stack.push(cont)
-            currentZIO = zio
-
-          case Async(register) => {
-            if (stack.isEmpty) {
-              loop = false
-              register(erasedCallback(callback))
-            } else {
-              loop = false;
-              register { a =>
-                currentZIO = ZIO.succeedNow(a)
-                resume()
-              }
-            }
-          }
-
-          case Fork(zio) => {
-            val fiber = new FiberImpl(zio)
-            fiber.start()
-            complete(fiber)
-          }
-
-        }
-      }
-
-    run()
+    zio.unsafeRunFiber
+    latch.await()
+    result
   }
+
 }
 
 object ZIO {
