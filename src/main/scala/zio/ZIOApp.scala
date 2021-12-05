@@ -2,6 +2,8 @@ package zio
 
 import zio.ZIO._
 
+import scala.concurrent.ExecutionContext
+
 case class Person(name: String, age: Int)
 
 object Person {
@@ -151,6 +153,11 @@ object StackSafety extends ZIOApp {
 
   val myProgram = ZIO.succeed(println("Howdy!")).repeat(100000)
 
+  def run = myProgram
+}
+
+object Shift extends ZIOApp {
+  val myProgram = ZIO.succeed(5).shift(ExecutionContext.global)
   def run = myProgram
 }
 

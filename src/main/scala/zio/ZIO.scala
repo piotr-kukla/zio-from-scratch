@@ -3,7 +3,7 @@ package zio
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
-import zio.ZIO.{Async, Effect, FlatMap, Fork, Succeed}
+import zio.ZIO.{Async, Effect, FlatMap, Fork, Shift, Succeed}
 
 import scala.concurrent.ExecutionContext
 
@@ -12,7 +12,7 @@ trait Fiber[+A] {
   def interrupt: ZIO[Unit] = ???
 }
 
-final case class FiberContext[A](startZIO: ZIO[A]) extends Fiber[A] {
+private final case class FiberContext[A](startZIO: ZIO[A], startExecutor: ExecutionContext) extends Fiber[A] {
 
   sealed trait FiberState
 
@@ -67,6 +67,7 @@ final case class FiberContext[A](startZIO: ZIO[A]) extends Fiber[A] {
   val stack = new scala.collection.mutable.Stack[Cont]()
 
   var currentZIO = erase(startZIO)
+  var currentExecutor = startExecutor
 
   var loop = true
 
@@ -110,67 +111,20 @@ final case class FiberContext[A](startZIO: ZIO[A]) extends Fiber[A] {
         }
 
         case Fork(zio) => {
-          val fiber = FiberContext(zio)
+          val fiber = FiberContext(zio, currentExecutor)
           continue(fiber)
+        }
+
+        case Shift(executor) => {
+          currentExecutor = executor
+          continue(())
         }
 
       }
     }
 
-  ExecutionContext.global.execute(() => run())
+  currentExecutor.execute(() => run())
 }
-
-
-//class FiberImpl[A](zio: ZIO[A]) extends Fiber[A] {
-//
-//  sealed trait FiberState
-//
-//  case class Running(callbacks: List[A => Any]) extends FiberState
-//  case class Done(result: A) extends FiberState
-//
-//  val state: AtomicReference[FiberState] = new AtomicReference[FiberState](Running(List.empty))
-//
-//  def complete(result: A): Unit = {
-//    var loop = true
-//    while(loop) {
-//      val oldState = state.get()
-//      oldState match {
-//        case Running(callbacks) =>
-//          if (state.compareAndSet(oldState, Done(result))) {
-//            callbacks.foreach(cb => cb(result))
-//            loop = false
-//          }
-//        case Done(result) =>
-//          throw new Exception("Internal defect: Fiber complete twice.")
-//      }
-//    }
-//  }
-//
-//  def await(callback: A => Any): Unit = {
-//    var loop = true
-//    while(loop) {
-//      var oldState = state.get()
-//      oldState match {
-//        case Running(callbacks) =>
-//          loop = !state.compareAndSet(oldState, Running(callback :: callbacks))
-//
-//        case Done(result) =>
-//          callback(result)
-//          loop = false
-//      }
-//    }
-//  }
-//
-////  override def start(): Unit =
-////    ExecutionContext.global.execute { () =>
-////      zio.run(complete)
-////    }
-//
-//  override def join: ZIO[A] = ZIO.async {
-//    complete => await(complete)
-//  }
-//
-//}
 
 sealed trait ZIO[+A] { self =>
 
@@ -187,6 +141,9 @@ sealed trait ZIO[+A] { self =>
   def repeat(n: Int): ZIO[Unit] =
     if (n <= 0) ZIO.succeedNow()
     else self *> repeat(n-1)
+
+  def shift(executor: ExecutionContext): ZIO[Unit] =
+    Shift(executor)
 
   def zipPar[B](that: ZIO[B]): ZIO[(A,B)] =
     for {
@@ -211,8 +168,8 @@ sealed trait ZIO[+A] { self =>
           .map(b => f(a, b))
       )
 
-  final def unsafeRunFiber: Fiber[A] =
-    FiberContext(self)
+  private final def unsafeRunFiber: Fiber[A] =
+    FiberContext(self, ZIO.defaultExecutor)
 
   final def unsafeRunSync: A = {
     val latch = new CountDownLatch(1)
@@ -248,4 +205,8 @@ object ZIO {
   case class Async[A](register: (A => Any) => Any) extends ZIO[A]
 
   case class Fork[A](zio: ZIO[A]) extends ZIO[Fiber[A]]
+
+  case class Shift(executor: ExecutionContext) extends ZIO[Unit]
+
+  private val defaultExecutor = ExecutionContext.global
 }
