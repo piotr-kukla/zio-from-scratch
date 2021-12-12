@@ -161,4 +161,12 @@ object Shift extends ZIOApp {
   def run = myProgram
 }
 
+object ErrorHandling extends ZIOApp {
+
+  val myProgram = ZIO.fail("Failed")
+    .flatMap(_ => ZIO.succeed(println("Here")))
+    .catchAll(e => ZIO.succeed(println("Recovered from an error")))
+  def run = myProgram
+}
+
 
