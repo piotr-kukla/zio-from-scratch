@@ -174,6 +174,9 @@ sealed trait ZIO[+E, +A] { self =>
   def foldZIO[E2, B](failure: E => ZIO[E2, B], success: A => ZIO[E2, B]): ZIO[E2, B] =
     Fold(self, failure, success)
 
+  def foldCauseZIO[E2, B](failure: Cause[E] => ZIO[E2, B], success: A => ZIO[E2, B]): ZIO[E2, B] =
+    Fold(self, failure, success)
+
   def map[B](f: A => B): ZIO[E, B] =
     flatMap(a => ZIO.succeedNow(f(a)))
 
@@ -233,7 +236,9 @@ sealed trait ZIO[+E, +A] { self =>
 object ZIO {
   def async[A](register: (A => Any) => Any):ZIO[Nothing, A] = ZIO.Async(register)
 
-  def fail[E](e: => E): ZIO[E, Nothing] = ZIO.Fail(() => e)
+  def fail[E](e: => E): ZIO[E, Nothing] = failCause(Cause.Fail(e))
+
+  def failCause[E](cause: => Cause[E]): ZIO[E, Nothing] = Fail(() => cause)
 
   def fromEither[E, A](either: Either[E, A]): ZIO[E, A] =
     either.fold(e => fail(e), a => succeedNow(a))
@@ -256,7 +261,7 @@ object ZIO {
 
   case class Shift(executor: ExecutionContext) extends ZIO[Nothing, Unit]
 
-  case class Fail[E](e: () => E) extends ZIO[E, Nothing]
+  case class Fail[E](e: () => Cause[E]) extends ZIO[E, Nothing]
 
   case class Fold[E, E2, A, B](zio: ZIO[E, A], failure: E => ZIO[E2, B], success: A => ZIO[E2, B])
     extends ZIO[E2, B] with (A => ZIO[E2, B]) {
@@ -264,4 +269,11 @@ object ZIO {
   }
 
   private val defaultExecutor = ExecutionContext.global
+}
+
+sealed trait Cause[+E]
+
+object Cause {
+  final case class Fail[+E](error: E) extends Cause[E]
+  final case class Die(throwable: Throwable) extends Cause[Nothing]
 }
