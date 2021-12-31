@@ -3,7 +3,7 @@ package zio
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
-import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, Shift, Succeed, SucceedNow}
+import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, Shift, Succeed, SucceedNow, failCause}
 
 import scala.concurrent.ExecutionContext
 
@@ -16,12 +16,12 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
 
   sealed trait FiberState
 
-  case class Running(callbacks: List[Either[E, A] => Any]) extends FiberState
-  case class Done(result: Either[E, A]) extends FiberState
+  case class Running(callbacks: List[Exit[E, A] => Any]) extends FiberState
+  case class Done(result: Exit[E, A]) extends FiberState
 
   val state: AtomicReference[FiberState] = new AtomicReference[FiberState](Running(List.empty))
 
-  def complete(result: Either[E, A]): Unit = {
+  def complete(result: Exit[E, A]): Unit = {
     var loop = true
     while(loop) {
       val oldState = state.get()
@@ -37,7 +37,7 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
     }
   }
 
-  def await(callback: Either[E, A] => Any): Unit = {
+  def await(callback: Exit[E, A] => Any): Unit = {
     var loop = true
     while(loop) {
       var oldState = state.get()
@@ -52,9 +52,9 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
     }
   }
 
-  override def join: ZIO[E, A] = ZIO.async[Either[E, A]] {
+  override def join: ZIO[E, A] = ZIO.async[Exit[E, A]] {
     complete => await(complete)
-  }.flatMap(ZIO.fromEither)
+  }.flatMap(ZIO.done)
 
   type Erased = ZIO[Any, Any]
   type ErasedCallback = Any => Any
@@ -79,7 +79,7 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
   def continue(value: Any) = {
     if (stack.isEmpty) {
       loop = false;
-      complete(Right(value.asInstanceOf[A]))
+      complete(Exit.succeed(value.asInstanceOf[A]))
     } else {
       val cont = stack.pop()
       currentZIO = cont(value)
@@ -104,53 +104,59 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
 
   def run(): Unit =
     while (loop) {
-      currentZIO match {
-        case SucceedNow(value) =>
-          continue(value)
-        case Succeed(thunk) =>
-          continue(thunk())
-        case FlatMap(zio, cont: Cont) =>
-          stack.push(cont)
-          currentZIO = zio
+      try {
+        currentZIO match {
+          case SucceedNow(value) =>
+            continue(value)
+          case Succeed(thunk) =>
+            continue(thunk())
+          case FlatMap(zio, cont: Cont) =>
+            stack.push(cont)
+            currentZIO = zio
 
-        case Async(register) => {
-          if (stack.isEmpty) {
-            loop = false
-            register { a => complete(Right(a.asInstanceOf[A])) }
-          } else {
-            loop = false;
-            register { a =>
-              currentZIO = ZIO.succeedNow(a)
-              resume()
+          case Async(register) => {
+            if (stack.isEmpty) {
+              loop = false
+              register { a => complete(Exit.succeed(a.asInstanceOf[A])) }
+            } else {
+              loop = false;
+              register { a =>
+                currentZIO = ZIO.succeedNow(a)
+                resume()
+              }
             }
           }
-        }
 
-        case Fork(zio) => {
-          val fiber = FiberContext(zio, currentExecutor)
-          continue(fiber)
-        }
-
-        case Shift(executor) => {
-          currentExecutor = executor
-          continue(())
-        }
-
-        case Fail(e) => {
-          val errorHandler = findNextErrorHandler()
-          if (errorHandler eq null) {
-            complete(Left(e().asInstanceOf[E]))
-            //loop = false
-          } else {
-            currentZIO = errorHandler.failure(e())
+          case Fork(zio) => {
+            val fiber = FiberContext(zio, currentExecutor)
+            continue(fiber)
           }
+
+          case Shift(executor) => {
+            currentExecutor = executor
+            continue(())
+          }
+
+          case Fail(e) => {
+            val errorHandler = findNextErrorHandler()
+            if (errorHandler eq null) {
+              complete(Exit.fail(e().asInstanceOf[E]))
+              //complete(Exit.Failure(Cause.Fail(e().asInstanceOf[E])))
+              //loop = false
+            } else {
+              currentZIO = errorHandler.failure(e())
+            }
+          }
+
+          case fold @ Fold(zio, failure, success) =>
+            stack.push(fold)
+            currentZIO = zio
+
         }
-
-        case fold @ Fold(zio, failure, success) =>
-          stack.push(fold)
-          currentZIO = zio
-
+      } catch {
+        case t: Throwable => currentZIO = ZIO.failCause(Cause.Die(t))
       }
+
     }
 
   currentExecutor.execute(() => run())
@@ -172,7 +178,10 @@ sealed trait ZIO[+E, +A] { self =>
     foldZIO(e => ZIO.succeedNow(failure(e)), a => ZIO.succeedNow (success(a)))
 
   def foldZIO[E2, B](failure: E => ZIO[E2, B], success: A => ZIO[E2, B]): ZIO[E2, B] =
-    Fold(self, failure, success)
+    foldCauseZIO( {
+      case Cause.Fail(e) => failure(e)
+      case Cause.Die(throwable) => failCause(Cause.Die(throwable))
+    }, success)
 
   def foldCauseZIO[E2, B](failure: Cause[E] => ZIO[E2, B], success: A => ZIO[E2, B]): ZIO[E2, B] =
     Fold(self, failure, success)
@@ -213,16 +222,16 @@ sealed trait ZIO[+E, +A] { self =>
   private final def unsafeRunFiber: Fiber[E, A] =
     FiberContext(self, ZIO.defaultExecutor)
 
-  final def unsafeRunSync: Either[E, A] = {
+  final def unsafeRunSync: Exit[E, A] = {
     val latch = new CountDownLatch(1)
-    var result: Either[E, A] = null.asInstanceOf[Either[E, A]]
-    val zio = self.foldZIO (
-      e => ZIO.succeed {
-        result = Left(e)
+    var result: Exit[E, A] = null.asInstanceOf[Exit[E, A]]
+    val zio = self.foldCauseZIO (
+      cause => ZIO.succeed {
+        result = Exit.Failure(cause)
         latch.countDown()
       },
       a => ZIO.succeed {
-        result = Right(a)
+        result = Exit.succeed(a)
         latch.countDown()
       }
     )
@@ -238,10 +247,16 @@ object ZIO {
 
   def fail[E](e: => E): ZIO[E, Nothing] = failCause(Cause.Fail(e))
 
-  def failCause[E](cause: => Cause[E]): ZIO[E, Nothing] = Fail(() => cause)
+  def failCause[E](cause: => Cause[E]): ZIO[E, Nothing] = ZIO.Fail(() => cause)
 
   def fromEither[E, A](either: Either[E, A]): ZIO[E, A] =
     either.fold(e => fail(e), a => succeedNow(a))
+
+  def done[E,A](exit: Exit[E,A]): ZIO[E, A] =
+    exit match {
+      case Exit.Success(a) => succeedNow(a)
+      case Exit.Failure(e) => failCause(e)
+    }
 
   def succeed[A](value: => A): ZIO[Nothing, A] = ZIO.Succeed(() => value)
 
@@ -263,7 +278,7 @@ object ZIO {
 
   case class Fail[E](e: () => Cause[E]) extends ZIO[E, Nothing]
 
-  case class Fold[E, E2, A, B](zio: ZIO[E, A], failure: E => ZIO[E2, B], success: A => ZIO[E2, B])
+  case class Fold[E, E2, A, B](zio: ZIO[E, A], failure: Cause[E] => ZIO[E2, B], success: A => ZIO[E2, B])
     extends ZIO[E2, B] with (A => ZIO[E2, B]) {
     override def apply(a: A): ZIO[E2, B] = success(a)
   }
@@ -276,4 +291,15 @@ sealed trait Cause[+E]
 object Cause {
   final case class Fail[+E](error: E) extends Cause[E]
   final case class Die(throwable: Throwable) extends Cause[Nothing]
+}
+
+sealed trait Exit[+E, +A]
+
+object Exit {
+  final case class Success[+A](a: A) extends Exit[Nothing, A]
+  final case class Failure[+E](failure: Cause[E]) extends Exit[E, Nothing]
+
+  def succeed[A](value: A): Exit[Nothing, A] = Success(value)
+  def fail[E](error: E): Exit[E, Nothing] = Failure(Cause.Fail(error))
+  def die(throwable: Throwable): Exit[Nothing, Nothing] = Failure(Cause.Die(throwable))
 }

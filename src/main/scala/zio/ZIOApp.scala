@@ -169,4 +169,18 @@ object ErrorHandling extends ZIOApp {
   def run = myProgram
 }
 
+object ErrorHandling2 extends ZIOApp {
+
+  val io =
+    ZIO.succeed { throw new NoSuchElementException("No such element")}
+    .catchAll(_ => ZIO.succeed(println("This should never be shown")))
+    .foldCauseZIO(
+      c => ZIO.succeed(println(s"Recovered from a cause $c")) *> ZIO.succeed(1),
+      _ => ZIO.succeed(0)
+    )
+
+
+  def run = io
+}
+
 
