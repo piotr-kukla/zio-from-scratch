@@ -183,4 +183,15 @@ object ErrorHandling2 extends ZIOApp {
   def run = io
 }
 
+object Interruption extends ZIOApp {
+
+  val io = for {
+    fiber <- ZIO.succeed(println("Howdy!")).forever.ensuring(ZIO.succeed(println("Good bye"))).fork
+    _     <- ZIO.succeed(Thread.sleep(1000))
+    _     <- fiber.interrupt
+  } yield ()
+
+  def run = io
+}
+
 

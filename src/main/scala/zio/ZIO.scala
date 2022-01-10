@@ -1,7 +1,7 @@
 package zio
 
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, Shift, Succeed, SucceedNow, failCause}
 
@@ -9,7 +9,7 @@ import scala.concurrent.ExecutionContext
 
 trait Fiber[+E, +A] {
   def join: ZIO[E, A]
-  def interrupt: ZIO[Nothing, Unit] = ???
+  def interrupt: ZIO[Nothing, Unit]
 }
 
 private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: ExecutionContext) extends Fiber[E, A] {
@@ -20,6 +20,18 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
   case class Done(result: Exit[E, A]) extends FiberState
 
   val state: AtomicReference[FiberState] = new AtomicReference[FiberState](Running(List.empty))
+
+  //Has someone sent us the signal to stop executing?
+  val interrupted: AtomicBoolean = new AtomicBoolean(false)
+  //Ae we in the process of finalizing ourselves
+  val isInterrupting: AtomicBoolean = new AtomicBoolean(false)
+  //Are we in a region where we are subject to being interrupted
+  val isInterruptible: AtomicBoolean = new AtomicBoolean(true)
+
+  def shouldInterrupt(): Boolean =
+    interrupted.get() && isInterruptible.get() && !isInterrupting.get()
+
+  def interrupt: ZIO[Nothing, Unit] = ZIO.succeed(interrupted.set(true))
 
   def complete(result: Exit[E, A]): Unit = {
     var loop = true
@@ -104,59 +116,65 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
 
   def run(): Unit =
     while (loop) {
-      try {
-        currentZIO match {
-          case SucceedNow(value) =>
-            continue(value)
-          case Succeed(thunk) =>
-            continue(thunk())
-          case FlatMap(zio, cont: Cont) =>
-            stack.push(cont)
-            currentZIO = zio
+      //val shouldInterrupt = interrupted.get
+      if (shouldInterrupt()) {
+        isInterrupting.set(true)
+        stack.push(_ => currentZIO)
+        currentZIO = ZIO.failCause(Cause.Interrupt)
+      } else {
+        try {
+          currentZIO match {
+            case SucceedNow(value) =>
+              continue(value)
+            case Succeed(thunk) =>
+              continue(thunk())
+            case FlatMap(zio, cont: Cont) =>
+              stack.push(cont)
+              currentZIO = zio
 
-          case Async(register) => {
-            if (stack.isEmpty) {
-              loop = false
-              register { a => complete(Exit.succeed(a.asInstanceOf[A])) }
-            } else {
-              loop = false;
-              register { a =>
-                currentZIO = ZIO.succeedNow(a)
-                resume()
+            case Async(register) => {
+              if (stack.isEmpty) {
+                loop = false
+                register { a => complete(Exit.succeed(a.asInstanceOf[A])) }
+              } else {
+                loop = false;
+                register { a =>
+                  currentZIO = ZIO.succeedNow(a)
+                  resume()
+                }
               }
             }
-          }
 
-          case Fork(zio) => {
-            val fiber = FiberContext(zio, currentExecutor)
-            continue(fiber)
-          }
-
-          case Shift(executor) => {
-            currentExecutor = executor
-            continue(())
-          }
-
-          case Fail(e) => {
-            val errorHandler = findNextErrorHandler()
-            if (errorHandler eq null) {
-              complete(Exit.fail(e().asInstanceOf[E]))
-              //complete(Exit.Failure(Cause.Fail(e().asInstanceOf[E])))
-              //loop = false
-            } else {
-              currentZIO = errorHandler.failure(e())
+            case Fork(zio) => {
+              val fiber = FiberContext(zio, currentExecutor)
+              continue(fiber)
             }
+
+            case Shift(executor) => {
+              currentExecutor = executor
+              continue(())
+            }
+
+            case Fail(e) => {
+              val errorHandler = findNextErrorHandler()
+              if (errorHandler eq null) {
+                complete(Exit.fail(e().asInstanceOf[E]))
+                //complete(Exit.Failure(Cause.Fail(e().asInstanceOf[E])))
+                //loop = false
+              } else {
+                currentZIO = errorHandler.failure(e())
+              }
+            }
+
+            case fold @ Fold(zio, failure, success) =>
+              stack.push(fold)
+              currentZIO = zio
+
           }
-
-          case fold @ Fold(zio, failure, success) =>
-            stack.push(fold)
-            currentZIO = zio
-
+        } catch {
+          case t: Throwable => currentZIO = ZIO.failCause(Cause.Die(t))
         }
-      } catch {
-        case t: Throwable => currentZIO = ZIO.failCause(Cause.Die(t))
       }
-
     }
 
   currentExecutor.execute(() => run())
@@ -172,6 +190,9 @@ sealed trait ZIO[+E, +A] { self =>
   def catchAll[E2, A1 >: A](failure: E => ZIO[E2, A1]): ZIO[E2, A1] =
     foldZIO(failure, ZIO.succeedNow(_))
 
+  def ensuring(finalizer: ZIO[Nothing, Any]): ZIO[E, A] =
+    foldCauseZIO(cause => finalizer *> ZIO.failCause(cause), a => finalizer *> ZIO.succeedNow(a))
+
   def flatMap[E1 >: E, B](f: A => ZIO[E1, B]): ZIO[E1, B] = ZIO.FlatMap(self, f)
 
   def fold[B](failure: E => B, success: A => B): ZIO[E, B] =
@@ -186,12 +207,22 @@ sealed trait ZIO[+E, +A] { self =>
   def foldCauseZIO[E2, B](failure: Cause[E] => ZIO[E2, B], success: A => ZIO[E2, B]): ZIO[E2, B] =
     Fold(self, failure, success)
 
+  def forever: ZIO[E, Nothing] = self *> self.forever
+
   def map[B](f: A => B): ZIO[E, B] =
     flatMap(a => ZIO.succeedNow(f(a)))
 
   def repeat(n: Int): ZIO[E, Unit] =
     if (n <= 0) ZIO.succeedNow()
     else self *> repeat(n-1)
+
+  sealed trait InterruptStatus
+  object InterruptStatus {
+    case object Interruptible extends InterruptStatus
+    case object Uninterruptible extends InterruptStatus
+  }
+
+  def setInterruptStatus(interruptStatus: InterruptStatus): ZIO[E, A]
 
   def shift(executor: ExecutionContext): ZIO[Nothing, Unit] =
     Shift(executor)
@@ -291,6 +322,7 @@ sealed trait Cause[+E]
 object Cause {
   final case class Fail[+E](error: E) extends Cause[E]
   final case class Die(throwable: Throwable) extends Cause[Nothing]
+  case object Interrupt extends Cause[Nothing]
 }
 
 sealed trait Exit[+E, +A]
