@@ -3,7 +3,8 @@ package zio
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
-import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, Shift, Succeed, SucceedNow, failCause}
+import zio.InterruptStatus.{Interruptible, Uninterruptible}
+import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, SetInterruptStatus, Shift, Succeed, SucceedNow, failCause}
 
 import scala.concurrent.ExecutionContext
 
@@ -155,6 +156,11 @@ private final case class FiberContext[E, A](startZIO: ZIO[E, A], startExecutor: 
               continue(())
             }
 
+            case SetInterruptStatus(zio, interruptStatus) =>
+              val oldIsInterruptible = isInterruptible.get()
+              isInterruptible.set(interruptStatus.toBoolean)
+              currentZIO = zio.ensuring(ZIO.succeed(isInterruptible.set(oldIsInterruptible)))
+
             case Fail(e) => {
               val errorHandler = findNextErrorHandler()
               if (errorHandler eq null) {
@@ -216,13 +222,12 @@ sealed trait ZIO[+E, +A] { self =>
     if (n <= 0) ZIO.succeedNow()
     else self *> repeat(n-1)
 
-  sealed trait InterruptStatus
-  object InterruptStatus {
-    case object Interruptible extends InterruptStatus
-    case object Uninterruptible extends InterruptStatus
-  }
+  def setInterruptStatus(interruptStatus: InterruptStatus): ZIO[E, A] =
+    ZIO.SetInterruptStatus(self, interruptStatus)
 
-  def setInterruptStatus(interruptStatus: InterruptStatus): ZIO[E, A]
+  def interruptible: ZIO[E, A] = setInterruptStatus(InterruptStatus.Interruptible)
+
+  def uninterruptible: ZIO[E, A] = setInterruptStatus(InterruptStatus.Uninterruptible)
 
   def shift(executor: ExecutionContext): ZIO[Nothing, Unit] =
     Shift(executor)
@@ -305,6 +310,8 @@ object ZIO {
 
   case class Fork[E, A](zio: ZIO[E, A]) extends ZIO[Nothing, Fiber[E, A]]
 
+  case class SetInterruptStatus[E, A](zio: ZIO[E, A], interruptStatus: InterruptStatus) extends ZIO[E, A]
+
   case class Shift(executor: ExecutionContext) extends ZIO[Nothing, Unit]
 
   case class Fail[E](e: () => Cause[E]) extends ZIO[E, Nothing]
@@ -334,4 +341,18 @@ object Exit {
   def succeed[A](value: A): Exit[Nothing, A] = Success(value)
   def fail[E](error: E): Exit[E, Nothing] = Failure(Cause.Fail(error))
   def die(throwable: Throwable): Exit[Nothing, Nothing] = Failure(Cause.Die(throwable))
+}
+
+sealed trait InterruptStatus { self =>
+  def toBoolean: Boolean =
+    self match {
+      case Interruptible => true
+      case Uninterruptible => false
+    }
+
+}
+
+object InterruptStatus {
+  case object Interruptible extends InterruptStatus
+  case object Uninterruptible extends InterruptStatus
 }
