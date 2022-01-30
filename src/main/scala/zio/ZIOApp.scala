@@ -18,6 +18,7 @@ trait ZIOApp {
   def main(args: Array[String]): Unit = {
     val result = run.unsafeRunSync
     println(s"The result was $result")
+    Thread.sleep(2000)
   }
 
 
@@ -189,6 +190,18 @@ object Interruption extends ZIOApp {
     fiber <- ZIO.succeed(println("Howdy!")).forever.ensuring(ZIO.succeed(println("Good bye"))).fork
     _     <- ZIO.succeed(Thread.sleep(1000))
     _     <- fiber.interrupt
+  } yield ()
+
+  def run = io
+}
+
+object Uninterruptible extends ZIOApp {
+  val io = for {
+    fiber <- (ZIO.succeed(println("Howdy!")).repeat(100000).uninterruptible *>
+               ZIO.succeed(println("Howdy Howdy!")).forever)
+        .ensuring(ZIO.succeed(println("Bowdy!"))).fork
+    _ <- ZIO.succeed(Thread.sleep(300))
+    _ <- fiber.interrupt
   } yield ()
 
   def run = io
