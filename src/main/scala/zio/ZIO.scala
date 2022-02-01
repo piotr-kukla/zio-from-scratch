@@ -3,8 +3,8 @@ package zio
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
-import zio.InterruptStatus.{Interruptible, Uninterruptible}
-import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, SetInterruptStatus, Shift, Succeed, SucceedNow, failCause}
+import zio.InterruptStatus.{Interruptible}
+import zio.ZIO.{Async, Fail, FlatMap, Fold, Fork, SetInterruptStatus, Succeed, SucceedNow, failCause}
 
 import scala.concurrent.ExecutionContext
 
@@ -71,15 +71,17 @@ private final case class FiberContext[E, A](startZIO: ZIO[Any, E, A], startExecu
     complete => await(complete)
   }.flatMap(ZIO.done)
 
-  type Erased = ZIO[Nothing, Any, Any]
+  type Erased = ZIO[Any, Any, Any]
   type ErasedCallback = Any => Any
   type Cont = Any => Erased
 
-  def erase[R, E, A](zio: ZIO[R, E, A]): Erased = zio
+  def erase[R, E, A](zio: ZIO[R, E, A]): Erased = zio.asInstanceOf[Erased]
 
   def erasedCallback[A](cb: A => Unit): ErasedCallback = cb.asInstanceOf[ErasedCallback]
 
   val stack = new scala.collection.mutable.Stack[Cont]()
+
+  val envStack = new scala.collection.mutable.Stack[Any]()
 
   var currentZIO = erase(startZIO)
   var currentExecutor = startExecutor
@@ -178,6 +180,13 @@ private final case class FiberContext[E, A](startZIO: ZIO[Any, E, A], startExecu
               stack.push(fold)
               currentZIO = zio
 
+            case ZIO.Provide(zio, env) =>
+              envStack.push(env)
+              currentZIO = zio.asInstanceOf[ZIO[Any, Any, Any]].ensuring(ZIO.succeed(envStack.pop()))
+
+            case ZIO.Access(f) =>
+              val currentEnv = envStack.head
+              currentZIO = f(currentEnv)
           }
         } catch {
           case t: Throwable => currentZIO = ZIO.failCause(Cause.Die(t))
@@ -220,6 +229,8 @@ sealed trait ZIO[-R, +E, +A] { self =>
   def map[B](f: A => B): ZIO[R, E, B] =
     flatMap(a => ZIO.succeedNow(f(a)))
 
+  def provide(r: R): ZIO[Any, E, A] = ZIO.Provide(self, r)
+
   def repeat(n: Int): ZIO[R, E, Unit] =
     if (n <= 0) ZIO.succeedNow()
     else self *> repeat(n-1)
@@ -241,6 +252,8 @@ sealed trait ZIO[-R, +E, +A] { self =>
       a <- f1.join
       b <- f2.join
     } yield (a,b)
+
+
 
   def zip[R1 <: R, E1 >: E, B](that: ZIO[R1, E1, B]): ZIO[R1, E1, (A,B)] =
     zipWith(that)(_ -> _)
@@ -281,6 +294,12 @@ sealed trait ZIO[-R, +E, +A] { self =>
 }
 
 object ZIO {
+
+  def environment[R]: ZIO[R, Nothing, R] =
+    accessZIO(env => ZIO.succeed(env))
+
+  def accessZIO[R, E, A](f: R => ZIO[R, E, A]): ZIO[R, E, A] = ZIO.Access(f)
+
   def async[A](register: (A => Any) => Any):ZIO[Any, Nothing, A] = ZIO.Async(register)
 
   def fail[E](e: => E): ZIO[Any, E, Nothing] = failCause(Cause.Fail(e))
@@ -322,6 +341,11 @@ object ZIO {
     extends ZIO[R, E2, B] with (A => ZIO[R, E2, B]) {
     override def apply(a: A): ZIO[R, E2, B] = success(a)
   }
+
+  case class Provide[R, E, A](zio: ZIO[R, E, A], environment: R) extends ZIO[Any, E, A]
+
+  case class Access[R, E, A](f: R => ZIO[R, E, A]) extends ZIO[R, E, A]
+
 
   private val defaultExecutor = ExecutionContext.global
 }

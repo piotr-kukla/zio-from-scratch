@@ -1,6 +1,6 @@
 package zio
 
-import zio.ZIO._
+import zio.ZIO.{succeed, _}
 
 import scala.concurrent.ExecutionContext
 
@@ -205,6 +205,18 @@ object Uninterruptible extends ZIOApp {
   } yield ()
 
   def run = io
+}
+
+object Access extends ZIOApp {
+
+  val zio: ZIO[Int, Nothing, Unit] = ZIO.accessZIO[Int, Nothing, Unit](n => ZIO.succeed(println(n)))
+  val zio2: ZIO[Any, Nothing, Unit] = zio.provide(42)
+
+  val zio3 = ZIO.accessZIO[String, Nothing, Unit](str => ZIO.succeed(println(s"Look I'm a $str")))
+
+  val zio4: ZIO[String with Int, Nothing, (Unit, Unit)] = zio zip zio3
+
+  def run = zio2
 }
 
 
